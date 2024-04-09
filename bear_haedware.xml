@@ -1,0 +1,9 @@
+<library path="bear_hardware">
+  <class name="bear_hardware/BearHardware"
+         type="bear_hardware::BearHardware"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      A custom hardware interface for BEAR motors.
+    </description>
+  </class>
+</library> 
