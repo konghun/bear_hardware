@@ -16,6 +16,11 @@ using hardware_interface::CallbackReturn;
 using hardware_interface::return_type;
 
 namespace bear_hardware {
+
+constexpr uint8_t POSITION_CONTROL_MODE = 3;
+constexpr uint8_t VELOCITY_CONTROL_MODE = 2;
+constexpr uint8_t TORQUE_CONTROL_MODE = 1;
+
 struct JointValue {
     double position{0.0};
     double velocity{0.0};
@@ -61,6 +66,7 @@ private:
     bool torque_enabled_{false};
     ControlMode control_mode_{ControlMode::Position};
     bool mode_changed_{false};
+    CallbackReturn set_joint_params() ;
 
 
     

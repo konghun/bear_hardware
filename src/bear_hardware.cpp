@@ -5,9 +5,10 @@
 #include <string>
 #include <vector>
 
+
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
-
+#include "bear_macro.h" 
 #include "rclcpp/rclcpp.hpp"
 
 namespace bear_hardware {
@@ -80,8 +81,18 @@ std::vector<hardware_interface::CommandInterface> BearHardware::export_command_i
   return command_interfaces;
 }
 
+// 토크넣기,위치모드로 설정
 CallbackReturn BearHardware::on_activate(const rclcpp_lifecycle::State& /* previous_state */) {
   RCLCPP_DEBUG(rclcpp::get_logger(kBearHardware), "Activating Bear Hardware Interface.");
+
+
+  // 모터 모드 설정: 모든 조인트를 위치 제어 모드로 설정
+  for (auto joint_id : joint_ids_) {
+      if (!bear_->SetMode(joint_id, POSITION_CONTROL_MODE)) {  // POSITION_CONTROL_MODE은 위치 제어 모드를 가정
+          RCLCPP_ERROR(rclcpp::get_logger(kBearHardware), "Failed to set mode for joint %d", joint_id);
+          return CallbackReturn::ERROR;
+      }
+  }
 
   // Example: Enable torque for all connected BEAR motors
   for (auto joint_id : joint_ids_) {
@@ -92,6 +103,7 @@ CallbackReturn BearHardware::on_activate(const rclcpp_lifecycle::State& /* previ
   return CallbackReturn::SUCCESS;
 }
 
+// 토크 풀기
 CallbackReturn BearHardware::on_deactivate(const rclcpp_lifecycle::State& /* previous_state */) {
   RCLCPP_DEBUG(rclcpp::get_logger(kBearHardware), "Deactivating Bear Hardware Interface.");
 
@@ -104,36 +116,86 @@ CallbackReturn BearHardware::on_deactivate(const rclcpp_lifecycle::State& /* pre
   return CallbackReturn::SUCCESS;
 }
 
-return_type BearHardware::read(const rclcpp::Time& /* time */, const rclcpp::Duration& /* period */) {
-  // Implement your logic to read from the BEAR motors
-  // Example: read position, velocity, and effort for each joint
-  for (uint i = 0; i < joints_.size(); ++i) {
-    auto& joint = joints_[i];
-    joint.state.position = bear_->GetGoalPosition(joint_ids_[i]);
-    joint.state.velocity = bear_->GetGoalVelocity(joint_ids_[i]);
-    // Effort (current) reading example
-    joint.state.effort = bear_->GetPresentIq(joint_ids_[i]);
-  }
+//pid게인 넣기
+CallbackReturn BearHardware::set_joint_params()
+{
+    for (size_t i = 0; i < joint_ids_.size(); ++i) {
+        uint8_t joint_id = joint_ids_[i];
+        float pGain = 5.0f; // 예시 PID 게인 값, 실제 값은 구성에 따라 다를 수 있음
+        float iGain = 0.0f;
+        float dGain = 0.1f;
 
-  return return_type::OK;
-}
-
-return_type BearHardware::write(const rclcpp::Time& /* time */, const rclcpp::Duration& /* period */) {
-  // Implement your logic to write to the BEAR motors
-  // Example: write position or velocity commands for each joint
-  for (uint i = 0; i < joints_.size(); ++i) {
-    auto& joint = joints_[i];
-    // Set position or velocity based on control mode
-    if (control_mode_ == ControlMode::Position) {
-      bear_->SetGoalPosition(joint_ids_[i], joint.command.position);
-    } else if (control_mode_ == ControlMode::Velocity) {
-      bear_->SetGoalVelocity(joint_ids_[i], joint.command.velocity);
+        if (!bear_->SetPGainDirectForce(joint_id, pGain) ||
+            !bear_->SetIGainDirectForce(joint_id, iGain) ||
+            !bear_->SetDGainDirectForce(joint_id, dGain)) {
+            RCLCPP_ERROR(rclcpp::get_logger("BearHardware"), "Failed to set PID gains for joint %d", joint_id);
+            return CallbackReturn::ERROR;
+        }
     }
-    // Add effort (torque) command example if applicable
-  }
-
-  return return_type::OK;
+    RCLCPP_INFO(rclcpp::get_logger("BearHardware"), "All PID gains are set successfully.");
+    return CallbackReturn::SUCCESS;
 }
+
+// 값읽기
+return_type BearHardware::read(const rclcpp::Time& /* time */, const rclcpp::Duration& /* period */) {
+    // 모터 상태 값을 읽기 위한 주소 목록
+    std::vector<uint8_t> read_addresses = {
+        bear_macro::PRESENT_POSITION,  // 현재 위치
+        bear_macro::PRESENT_VELOCITY,  // 현재 속도
+        bear_macro::PRESENT_IQ         // 현재 전류 (토크)
+    };
+
+    // 모든 조인트에 대해 BulkRead를 수행
+    auto read_results = bear_->BulkRead(joint_ids_, read_addresses);
+
+    // 결과의 크기가 조인트의 수와 일치하는지 확인
+    if (read_results.size() != joints_.size()) {
+        RCLCPP_ERROR(rclcpp::get_logger(kBearHardware), "Bulk read failed or returned incomplete data.");
+        return return_type::ERROR;
+    }
+
+    // 읽은 결과를 각 조인트의 상태에 할당
+    for (size_t i = 0; i < joints_.size(); ++i) {
+        joints_[i].state.position = read_results[i][0]; // 위치
+        joints_[i].state.velocity = read_results[i][1]; // 속도
+        joints_[i].state.effort = read_results[i][2];   // 전류 (토크)
+    }
+
+    return return_type::OK;
+}
+
+
+// 값주기
+return_type BearHardware::write(const rclcpp::Time& /* time */, const rclcpp::Duration& /* period */) {
+    // 명령어 주소 및 데이터 준비
+    std::vector<uint8_t> write_addresses = {
+        bear_macro::GOAL_POSITION,  // 목표 위치
+        bear_macro::GOAL_VELOCITY,  // 목표 속도
+        bear_macro::GOAL_IQ         // 목표 전류 (토크)
+    };
+
+    std::vector<std::vector<float>> data;
+
+    // 모든 조인트에 대한 데이터를 준비
+    for (auto& joint : joints_) {
+        std::vector<float> joint_data;
+        joint_data.push_back(joint.command.position);  // 조인트별 목표 위치 설정
+        joint_data.push_back(joint.command.velocity);  // 조인트별 목표 속도 설정
+        joint_data.push_back(joint.command.effort);    // 조인트별 목표 전류 (토크) 설정
+        data.push_back(joint_data);
+    }
+
+    // BulkWrite 연산 수행
+    bool success = bear_->BulkWrite(joint_ids_, write_addresses, data);
+    if (!success) {
+        RCLCPP_ERROR(rclcpp::get_logger("BearHardware"), "BulkWrite operation failed.");
+        return return_type::ERROR;
+    }
+
+    RCLCPP_INFO(rclcpp::get_logger("BearHardware"), "BulkWrite operation successful.");
+    return return_type::OK;
+}
+
 
 }  // namespace bear_hardware
 
